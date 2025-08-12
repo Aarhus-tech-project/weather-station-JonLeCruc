@@ -36,22 +36,25 @@ public:
                 con->prepareStatement("INSERT INTO data (temp, pressure, altitude, humidity) VALUES (?, ?, ?, ?)")
             );
 
-            // Dummy parse example: assume message format like "22,1010,150,45"
             std::istringstream iss(payload);
             std::string temp, pressure, altitude, humidity;
             std::getline(iss, temp, ',');
             std::getline(iss, pressure, ',');
             std::getline(iss, altitude, ',');
             std::getline(iss, humidity, ',');
+            
+            if (isValidValue(temp) && isValidValue(pressure) && isValidValue(altitude) && isValidValue(humidity)) {
+                pstmt->setString(1, temp);
+                pstmt->setString(2, pressure);
+                pstmt->setString(3, altitude);
+                pstmt->setString(4, humidity);
+                pstmt->execute();
 
-            pstmt->setString(1, temp);
-            pstmt->setString(2, pressure);
-            pstmt->setString(3, altitude);
-            pstmt->setString(4, humidity);
-            pstmt->execute();
-
-            std::cout << "Data inserted into MySQL" << std::endl;
-        } catch (const sql::SQLException& e) {
+                std::cout << "Data inserted into MySQL" << std::endl;
+            } else {
+                std::cerr << "Invalid data received: " << payload << std::endl;
+            } 
+        catch (const sql::SQLException& e) {
             std::cerr << "MySQL error: " << e.what() << std::endl;
         }
     }
@@ -86,4 +89,8 @@ int main() {
     }
 
     return 0;
+}
+
+bool idValidValue(const std::string& value) {
+    return !value.empty() && value != "NaN" && value != "nan";
 }
