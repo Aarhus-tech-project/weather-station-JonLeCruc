@@ -9,52 +9,58 @@
 #include <mysql_error.h>
 #include <cppconn/prepared_statement.h>
 
+// MQTT Config
+const std::string BROKER_ADDRESS = "tcp://192.168.105.254:1883";
+const std::string TOPIC_NAME = "test";
+const std::string CLIENT_ID = "cpp_logger";
 
-const std::string MQTT_BROKER = "tcp://192.168.105.254:1883";
-const std::string MQTT_TOPIC = "test";
-const std::string MQTT_CLIENT_ID = "cpp_logger";
+// MySQL Config
+const std::string DB_HOST = "tcp://127.0.0.1:3306";
+const std::string DB_USER = "root";
+const std::string DB_PASS = "password";
+const std::string DB_NAME = "weather";
 
-// MySQL connection (adjust these as needed)
-const std::string MYSQL_HOST = "tcp://127.0.0.1:3306";
-const std::string MYSQL_USER = "root";
-const std::string MYSQL_PASS = "password";
-const std::string MYSQL_DB   = "weather";
+// Simple validation function to reject NaN or empty strings
+bool isValidValue(const std::string& value) {
+    return !value.empty() && value != "NaN" && value != "nan";
+}
 
-class callback : public virtual mqtt::callback {
+// Custom MQTT callback handler
+class MqttMessageHandler : public virtual mqtt::callback {
 public:
     void message_arrived(mqtt::const_message_ptr msg) override {
         std::string payload = msg->to_string();
-        std::cout << "Received message: " << payload << std::endl;
+        std::cout << "Incoming payload: " << payload << std::endl;
 
-        // Connect to MySQL and insert message
+        std::istringstream stream(payload);
+        std::string temp, pressure, altitude, humidity;
+        std::getline(stream, temp, ',');
+        std::getline(stream, pressure, ',');
+        std::getline(stream, altitude, ',');
+        std::getline(stream, humidity, ',');
+
+        if (!isValidValue(temp) || !isValidValue(pressure) || !isValidValue(altitude) || !isValidValue(humidity)) {
+            std::cerr << "Invalid data. Skipping insert: " << payload << std::endl;
+            return;
+        }
+
         try {
             sql::mysql::MySQL_Driver* driver = sql::mysql::get_mysql_driver_instance();
-            std::unique_ptr<sql::Connection> con(driver->connect(MYSQL_HOST, MYSQL_USER, MYSQL_PASS));
-            con->setSchema(MYSQL_DB);
+            std::unique_ptr<sql::Connection> conn(driver->connect(DB_HOST, DB_USER, DB_PASS));
+            conn->setSchema(DB_NAME);
 
-            std::unique_ptr<sql::PreparedStatement> pstmt(
-                con->prepareStatement("INSERT INTO data (temp, pressure, altitude, humidity) VALUES (?, ?, ?, ?)")
+            std::unique_ptr<sql::PreparedStatement> stmt(
+                conn->prepareStatement("INSERT INTO data (temp, pressure, altitude, humidity) VALUES (?, ?, ?, ?)")
             );
 
-            std::istringstream iss(payload);
-            std::string temp, pressure, altitude, humidity;
-            std::getline(iss, temp, ',');
-            std::getline(iss, pressure, ',');
-            std::getline(iss, altitude, ',');
-            std::getline(iss, humidity, ',');
-            
-            if (isValidValue(temp) && isValidValue(pressure) && isValidValue(altitude) && isValidValue(humidity)) {
-                pstmt->setString(1, temp);
-                pstmt->setString(2, pressure);
-                pstmt->setString(3, altitude);
-                pstmt->setString(4, humidity);
-                pstmt->execute();
+            stmt->setString(1, temp);
+            stmt->setString(2, pressure);
+            stmt->setString(3, altitude);
+            stmt->setString(4, humidity);
+            stmt->execute();
 
-                std::cout << "Data inserted into MySQL" << std::endl;
-            } else {
-                std::cerr << "Invalid data received: " << payload << std::endl;
-            } 
-        catch (const sql::SQLException& e) {
+            std::cout << "Data written to MySQL\n";
+        } catch (const sql::SQLException& e) {
             std::cerr << "MySQL error: " << e.what() << std::endl;
         }
     }
@@ -65,32 +71,29 @@ public:
 };
 
 int main() {
-    mqtt::async_client client(MQTT_BROKER, MQTT_CLIENT_ID);
-    callback cb;
-    client.set_callback(cb);
+    mqtt::async_client mqttClient(BROKER_ADDRESS, CLIENT_ID);
+    MqttMessageHandler handler;
+    mqttClient.set_callback(handler);
 
     mqtt::connect_options connOpts;
+
     try {
-        client.connect(connOpts)->wait();
-        std::cout << "Connected to MQTT broker." << std::endl;
+        mqttClient.connect(connOpts)->wait();
+        std::cout << "Connected to MQTT broker\n";
 
-        client.subscribe(MQTT_TOPIC, 1)->wait();
-        std::cout << "Subscribed to topic: " << MQTT_TOPIC << std::endl;
+        mqttClient.subscribe(TOPIC_NAME, 1)->wait();
+        std::cout << "Subscribed to topic: " << TOPIC_NAME << "\n";
 
-        // Stay alive
+        // Keep the app running
         while (true) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
 
-        client.disconnect()->wait();
+        mqttClient.disconnect()->wait();  // unreachable but graceful
     } catch (const mqtt::exception& e) {
         std::cerr << "MQTT error: " << e.what() << std::endl;
         return 1;
     }
 
     return 0;
-}
-
-bool idValidValue(const std::string& value) {
-    return !value.empty() && value != "NaN" && value != "nan";
 }
