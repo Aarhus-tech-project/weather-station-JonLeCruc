@@ -1,105 +1,141 @@
-#include <Adafruit_BME280.h>
-#include <Wire.h>
 #include <WiFiS3.h>
-#include <PubSubClient.h>
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME280.h>
+#include <ArduinoMqttClient.h>
 
-//MQTT
-const char* mqtt_server = "test.mosquitto.org";
-const int mqtt_port = 1883;
-const char* mqtt_topic = "vejrstation/herning/data";
+#define SEA_LEVEL_PRESSURE (1013.25)
 
-WiFiClient espClient;
-PubSubClient client(espClient);
-
-//Wifi
 const char* ssid = "h4prog";
 const char* password = "1234567890";
 
-WiFiServer server(80);
+const char* brokerIP = "192.168.105.254";
+const char* mqttTopic = "test";
 
-Adafruit_BME280 bme;
+WiFiClient wifiClient;
+MqttClient mqtt(wifiClient);
 
-unsigned long lastUpdate = 0;
-const long updateInterval = 5000;
+Adafruit_BME280 sensor;
 
 void setup() {
-  
-  Serial.begin(9600);
+  delay(1000); //small boot delay
+  Serial.begin(115200);
+  while (!Serial); //wait for serial montior to open
 
-  while (!Serial);
+  connectToWifi(); //connect to wifi
 
-  connectToWifi(ssid, password);
+  delay(1000); // stability delay
 
-  client.setServer(mqtt_server, mqtt_port);
-  
-  if (!bme.begin(0x76)) {
-    Serial.println("BME280 not found!");
-    while (1); // Halt if sensor not found
+  if (!sensor.begin(0x76)) {
+    Serial.println("Failed to find BME280 sensor");
+    while (true); // halt
   }
+
+  Serial.println("BME280 ready");
+
+  connectToMQTT(); //connect to mqtt broker
 }
 
 void loop() {
-  if (!client.connected()) {
+  mqtt.poll();
+  delay(10000); //Set the reading to an 10s interval
+
+  if (!mqtt.connected()) { //checks to handle if the broker is disconnected
+    Serial.println("MQTT disconnected. Reconnecting...");
     connectToMQTT();
   }
-  client.loop();
 
-  if (millis() - lastUpdate > updateInterval) {
-    lastUpdate = millis();
-
-    measureBME();
-  }
+  sendSensorData();
 }
 
-void measureBME() {
-  float temp = bme.readTemperature();
-  float hum = bme.readHumidity();
-  float pressure = bme.readPressure() / 100;
+/* connectToWifi
+Params: none
+Functionality: connects to wifi using the defined ssid/password.
+It won't continue the code as long as wifi isn't connected.
 
-    Serial.print("Temp: ");
-    Serial.print(temp, 1);
-    Serial.print(" °C | Hum: ");
-    Serial.print(hum, 1);
-    Serial.print(" % | Pressure: ");
-    Serial.print(pressure, 1);
-    Serial.println(" hPa");
+Returns: nothing, only prints in serial.
+ */
+void connectToWifi() {
+  Serial.print("Connecting to WiFi");
 
-    char payload[128];
-    snprintf(payload, sizeof(payload), 
-    "{\"temperature\":%.2f,\"humidity\":%.2f,\"pressure\":%.2f}",
-    temp, hum, pressure);
-
-    client.publish(mqtt_topic, payload);
-}
-
-bool connectToWifi(const char* ssid, const char* password) {
-  while (WiFi.begin(ssid, password) != WL_CONNECTED) {
+  int status = WL_IDLE_STATUS;
+  while (status != WL_CONNECTED) {
+    status = WiFi.begin(ssid, password);
     delay(1000);
     Serial.print(".");
   }
 
-  while (WiFi.localIP() == INADDR_NONE) {
-    delay(100);
-  }
-
-  Serial.println("\nconnected!");
-  Serial.print("IP: ");
+  Serial.println("\nConnected to WiFi!");
+  Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
-
-  server.begin();
 }
 
-//connect to mqtt
+/* connectToMQTT
+Params: none
+Functionality: Connects to the MQTT broker, it won't continue until the broker is connected.
+
+Returns: nothing, only prints in serial.
+ */
 void connectToMQTT() {
-  while (!client.connected()) {
-    Serial.print("Connecting to MQTT...");
-    if (client.connect("arduinoClient123")) {
-      Serial.println("connected");
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
-      delay(5000);
-    }
+  Serial.println("Connecting to MQTT...");
+
+  mqtt.setId("arduino-weather-sensor");
+
+  while (!mqtt.connect(brokerIP)) {
+    Serial.print("MQTT failed code: ");
+    Serial.println(mqtt.connectError());
+    delay(5000);
   }
+  
+  Serial.println("Connected to MQTT broker");
 }
+
+/* sendSensorData
+Params: none
+Functionality: Uses the BME280 sensor to store reading in variables.
+It formats these variables and sends the data to the broker.
+It calls the logToSerial function with the different reading in the parameter.
+Returns: nothing
+ */
+void sendSensorData() {
+  float temperature = sensor.readTemperature();
+  float pressure = sensor.readPressure() / 100.0;
+  float altitude = sensor.readAltitude(SEA_LEVEL_PRESSURE);
+  float humidity = sensor.readHumidity();
+
+  if (isnan(temperature) || isnan(pressure) || isnan(altitude) || isnan(humidity)) {
+    Serial.println("Sesnor reading invalid - skipping publish");
+    return;
+  }
+
+  // Combine values into CSV format
+  String payload = String(temperature, 2) + "," +
+                String(pressure, 2) + "," +
+                String(altitude, 2) + "," +
+                String(humidity, 2);
+
+  mqtt.beginMessage(mqttTopic);
+  mqtt.print(payload);
+  mqtt.endMessage();
+
+  logToSerial(temperature, pressure, altitude, humidity);
+}
+
+/* logToSerial
+Params: float temperature - example: 26.54, float pressure - example: 1015.04,
+float altitude - example: -15.22, float humidity - example: 50.74
+Functionality: Logs the different readings in the serial at 115200 baud.
+Returns: nothing
+ */
+void logToSerial(float t, float p, float a, float h) {
+  Serial.print("Temperature: ");
+  Serial.print(t);
+  Serial.print(" °C, Pressure: ");
+  Serial.print(p);
+  Serial.print(" hPa, Altitude: ");
+  Serial.print(a);
+  Serial.print(" m, Humidity: ");
+  Serial.print(h);
+  Serial.println(" %");
+}
+// by jon holm
